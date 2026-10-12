@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-bg: #1e2a36;
+  --color-ink-header: #111a23;
+  --color-ink-text: #e6eef5;
+  --color-ink-accent: #e89a2e;
+  --color-ink-grid: #2a3a4a;
+  --color-ink-grid-dark: #22303e;
+  --color-ink-beat: #334455;
+  --color-ink-bar: #4a6076;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #1e2a36;
+  color: #e6eef5;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  min-width: 1024px;
+}
+
+/* Focus visibility for a11y (NFR6) */
+:focus-visible {
+  outline: 2px solid #e89a2e;
+  outline-offset: 2px;
+}
+
+/* Dark-theme range inputs (scrollbars, volume): thin track, orange thumb. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: #2a3a4a;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #e89a2e;
+  border: none;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #e89a2e;
+  border: none;
+}
+input[type="range"]:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
