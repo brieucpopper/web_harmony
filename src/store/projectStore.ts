@@ -1,8 +1,9 @@
 // Project + transport UI state (PRD M1, FR1/FR10/FR11).
 // Big audio samples live here but components must select narrow slices.
 import { create } from 'zustand'
-import type { KeySignature, Project, ProjectStatus } from '../types'
+import type { Chunk, Frame, KeySignature, Project, ProjectStatus, VoiceId } from '../types'
 import { emptyProject } from '../types'
+import { VOICE_COLORS } from '../constants'
 import type { DecodedAudio } from '../dsp/audioUtil'
 import { autosaveAudio, autosaveProject, AUTOSAVE_AUDIO_ID } from '../persist/idb'
 import { undoStack } from './undo'
@@ -34,6 +35,12 @@ interface ProjectState {
   beginDecode: (fileName: string) => void
   reportProgress: (label: string, fraction: number) => void
   finishIngest: (decoded: DecodedAudio) => void
+  /** M2: decode done, pitch tracking running (FR1.4 Analyzing pitch x%). */
+  beginAnalysis: () => void
+  /** M2: pitch done, segmentation running. */
+  beginSegmenting: () => void
+  /** M2: analysis done — white voice + f0 cache, autosaved (FR2/FR11). */
+  finishAnalysis: (decoded: DecodedAudio, f0: Frame[], whiteId: VoiceId, chunks: Chunk[]) => void
   fail: (message: string) => void
   dismissError: () => void
   reset: () => void
@@ -43,6 +50,7 @@ interface ProjectState {
   setShowGrid: (v: boolean) => void
   setSnapToGrid: (v: boolean) => void
   setHighlightKey: (v: boolean) => void
+  setShowWaveform: (v: boolean) => void
   setMasterVol: (v: number) => void
   setLoopAll: (v: boolean) => void
   setPlaying: (v: boolean) => void
@@ -100,7 +108,8 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
   reportProgress: (label, fraction) => { set({ progressLabel: label, progress: Math.min(1, Math.max(0, fraction)) }); },
 
   finishIngest: (decoded) => {
-    // M1: single white-voice-less project shell. M2 adds f0 + white voice chunks.
+    // M1 shell / M2 degraded path (analysis failed): audio playable, no voices.
+    // M2 adds f0 + white voice chunks.
     const project = emptyProject(decoded.fileName)
     project.durationSec = decoded.durationSec
     project.sampleRate = decoded.sampleRate
@@ -112,6 +121,57 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     }
     // New project = new history: drop any undo/redo from the previous one
     // and clear stale chunk selection (ids would dangle).
+    undoStack.clear()
+    useSelectionStore.getState().clear()
+    scheduleAutosave(project, audio)
+    set({
+      project,
+      audio,
+      status: 'ready',
+      progress: 1,
+      progressLabel: 'Ready',
+      error: null,
+      dirty: true,
+    })
+  },
+
+  beginAnalysis: () => { set({
+      status: 'analyzing',
+      progress: 0.8,
+      progressLabel: 'Analyzing pitch…',
+      error: null,
+    }); },
+
+  beginSegmenting: () => { set({
+      status: 'segmenting',
+      progress: 0.95,
+      progressLabel: 'Segmenting notes…',
+    }); },
+
+  finishAnalysis: (decoded, f0, whiteId, chunks) => {
+    const project = emptyProject(decoded.fileName)
+    project.durationSec = decoded.durationSec
+    project.sampleRate = decoded.sampleRate
+    project.f0 = f0
+    // White voice = original timing/pitch (FR6.1). Silent files yield zero
+    // chunks; the voice remains so the user can delete it separately (FR5.2).
+    project.voices = [
+      {
+        id: whiteId,
+        name: 'Voice 1',
+        color: VOICE_COLORS[0],
+        mute: false,
+        solo: false,
+        volume: 1,
+        chunks,
+      },
+    ]
+    const audio: LoadedAudio = {
+      mono: decoded.mono,
+      sampleRate: decoded.sampleRate,
+      durationSec: decoded.durationSec,
+      fileName: decoded.fileName,
+    }
     undoStack.clear()
     useSelectionStore.getState().clear()
     scheduleAutosave(project, audio)
@@ -187,6 +247,14 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     set({ project: next, dirty: true })
   },
 
+  setShowWaveform: (v) => {
+    const { project, audio } = get()
+    if (project === null) return
+    const next = { ...project, showWaveform: v }
+    scheduleAutosave(next, audio)
+    set({ project: next, dirty: true })
+  },
+
   setMasterVol: (v) => { set({ masterVol: Math.min(1.5, Math.max(0, v)) }); },
   setLoopAll: (v) => { set({ loopAll: v }); },
   setPlaying: (v) => { set({ playing: v }); },
@@ -196,7 +264,11 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     // Pre-highlightKey autosaves lack the field — IDB data is untrusted,
     // so read through a partial and default to ON.
     const saved = project as Partial<Project>
-    const normalized: Project = { ...project, highlightKey: saved.highlightKey ?? true }
+    const normalized: Project = {
+      ...project,
+      highlightKey: saved.highlightKey ?? true,
+      showWaveform: saved.showWaveform ?? true,
+    }
     // Switching projects invalidates undo/redo + selection from the old one.
     // M6 Load calls this same path, so history never leaks across projects.
     undoStack.clear()

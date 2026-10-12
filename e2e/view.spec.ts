@@ -59,6 +59,23 @@ test('key highlight toggle enables with a project and flips state', async ({ pag
   await expect(box).toBeChecked()
 })
 
+test('waveform toggle hides the preview and persists across reload', async ({ page }) => {
+  await page.goto('/')
+  const box = page.getByRole('checkbox', { name: 'Show waveform' })
+  await expect(box).toBeDisabled()
+  await page.getByLabel('Choose audio file, MP3 or WAV').setInputFiles('/tmp/test-tone.wav')
+  await expect(page.getByTestId('file-status')).toContainText('test-tone.wav', { timeout: 10_000 })
+  await expect(box).toBeEnabled()
+  await expect(box).toBeChecked()
+  await box.uncheck()
+  await expect(box).not.toBeChecked()
+  // Autosave debounce is 1 s — wait, then reload must keep it off.
+  await page.waitForTimeout(1500)
+  await page.reload()
+  await expect(page.getByTestId('file-status')).toContainText('test-tone.wav', { timeout: 10_000 })
+  await expect(page.getByRole('checkbox', { name: 'Show waveform' })).not.toBeChecked()
+})
+
 test('labeled H/V zoom groups + 100% reset + vertical slider', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('group', { name: 'Horizontal zoom' })).toBeVisible()

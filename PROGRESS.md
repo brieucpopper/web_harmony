@@ -1,18 +1,17 @@
 # Harmony Gen — Progress & Handoff
 
-**Date:** 2026-10-13 · **State:** M0 + M1 shipped and verified, two bug-hunt
-rounds done · **Next:** M2 (pitch-track + segment)
+**Date:** 2026-10-13 · **State:** M0 + M1 + M2 shipped and verified · **Next:** M3 (core editor)
 **Read with:** `prd.md` (spec, §1–§12 + Part B). This records what was built,
-every deviation, and how pieces interact — enough for a second person to do M2.
+every deviation, and how pieces interact — enough for a second person to do M3.
 
 ## 1. Commands & gates
 
 ```bash
 cd /home/brieuc/code/harmony-gen
 npm run dev        # localhost:5173 (restart it if e2e fails impossibly — see §7)
-npm test           # vitest: 45 passed
+npm test           # vitest: 63 passed
 npm run lint       # eslint, must be silent
-npm run build      # tsc -b + vite + PWA; bundle ~352 KB (~111 KB gzip, budget 2 MB)
+npm run build      # tsc -b + vite + PWA; main ~361 KB (~114 KB gzip) + pitch worker ~195 KB, budget 2 MB
 npx playwright test  # 7 passed, system Chrome (see playwright.config.ts)
 ```
 
@@ -36,6 +35,10 @@ TS is `strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes`; lint add
 - `no-confusing-void-expression`: zustand setters use braces, never shorthand.
 - `exactOptionalPropertyTypes`: read possibly-stale flags with `!== false`,
   never `??` on required booleans.
+- `no-useless-assignment`: declare `let worker: Worker | null` without
+  initializer when both branches assign.
+- Untyped deps need ambient declarations: `dsp/aubiojs.d.ts` types the WASM
+  surface (else `no-unsafe-*` fires on the dynamic import).
 - No fat allocations in tests: `validateFileMeta` is tested with
   `{ name, size } as File`.
 
@@ -65,8 +68,8 @@ TS is `strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes`; lint add
   rebuilds the `AudioBuffer` from stored mono; `version !== 1` keeps current
   (NFR4). `beforeunload` guard while dirty.
 - `store/projectStore|selectionStore|undo` (snapshots via `structuredClone`,
-  depth 50, tested). `finishIngest`/`restore`/`reset` clear undo + selection so
-  history never leaks across projects.
+  depth 50, tested). `finishIngest`/`finishAnalysis`/`restore`/`reset` clear
+  undo + selection so history never leaks across projects.
 - UI: Dropzone (picker + drag-drop, progress only while busy, error toast, mono
   banner), TopBar (file status, BPM 40–240, 24-key selector, Grid/Snap/Key
   toggles, transport, 10 Hz readout, disabled M6 buttons), Ruler (bar.beat +
@@ -75,6 +78,49 @@ TS is `strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes`; lint add
 - `dsp/theory.ts` (forward from M4 for row highlight): `MAJOR/MINOR`,
   `pitchClass`, `scaleSet`, `isInScale`, `nearestInScale` (nearest, tie→down).
   M4/M5 snap reuses `nearestInScale`.
+
+### M2 — pitch-track + segment (white voice)
+- `dsp/pitch.ts` (pure, tested): `hopSamples`, `frameRmsDb` (silence floors
+  −90 dB), `median`, `postProcessFrames` — 50–1200 Hz gate, voiced if
+  `conf ≥ 0.7 && rms ≥ −40 dB`, MIDI convert, median-5 over voiced neighbours,
+  Hampel single-frame >200c reject. Vibrato survives; lone octave blips don't.
+- `dsp/pitchTrack.worker.ts` (Vite worker): `{start, mono, sampleRate}` in,
+  `progress`/`done`/`error` posts out, `cancel` flag checked per frame.
+  **`yinfast`** (spectral YIN — same family, ~3× faster than time-domain
+  `yin` at identical accuracy; `yin` misses the <2 s/60 s budget at ~2.1 s,
+  `yinfast` does 60 s in ~0.7 s). pitchy-MPM fallback if WASM fails to load.
+  `dsp/aubiojs.d.ts` ambient types (the package ships untyped).
+- `dsp/pitchTrack.ts`: `trackPitch` (worker + progress + AbortSignal; falls
+  back to `trackPitchSync` when workers are blocked) and exported
+  `trackPitchSync` (main-thread pitchy, chunked with yields — also the
+  Vitest/jsdom path).
+- `dsp/segment.ts` (pure, tested): voiced runs (min 80 ms) → dual-detector
+  splits (exact semitone edges with ≥5-frame sustain on both sides, clustered
+  with a median-window scan for transient-blurred jumps; step lands on the
+  exact frame, ±10 ms) → merge gaps <40 ms when sides agree ±50c → drop
+  <60 ms. Curve keeps the natural trajectory (+lerped micro-gaps),
+  `baseMidi = clamp(round(median))`, `origBaseMidi`/`pristineCurve`/`fineCents`
+  bookkeeping for M4/M5.
+- Wiring (`Dropzone` at the old M2 marker): decode → `beginAnalysis` →
+  worker (`Analyzing pitch x%…`, 0.8–0.92) → `beginSegmenting` → white Voice
+  (`Voice 1`, `VOICE_COLORS[0]`, `nanoid`) → `finishAnalysis` (f0 cache rides
+  along in autosave — reload skips re-analysis, asserted in e2e). Analysis
+  failure degrades to the M1 shell (audio playable) + blocking toast, never a
+  dead app. No abort checkpoint between resolve and finish: segmentation is
+  synchronous, so a late abort is a no-op by design (never a stuck state).
+- Canvas/Piano needed **zero** changes (voice-generic draw already).
+  `VoiceTabs` gained `data-testid="voice-tabs"` for the e2e white-voice +
+  reload assertions.
+- Verified: 63 unit tests (incl. `chain.test.ts`: synth vibrato → 1 chunk at
+  A3 with wobble intact; breaths → 2 chunks, no ghost notes); `vibrato.wav`
+  (220 Hz + 5 Hz, ±5 Hz dev) uploads to one wobbling white chunk (screenshot
+  `/tmp/vibrato-shot.png`); 60 s analysis 0.68 s.
+
+### Post-M2 tweak — Wave toggle
+- `Project.showWaveform` (default ON, persisted, old autosaves default ON in
+  `restore`): TopBar `Wave` checkbox (disabled with no project) hides the main
+  piano-roll waveform preview in `PitchCanvas`. Minimap overview always shows
+  the waveform (navigation, not clutter). E2E covers flip + reload persistence.
 
 ### Post-M1 feedback + bug-hunt rounds
 - **Gestures**: wheel = V-zoom to cursor, Ctrl/⌘+wheel = H-zoom, Shift+wheel =
@@ -96,9 +142,11 @@ TS is `strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes`; lint add
 
 ## 4. Data flows
 
-- **Ingest** (`Dropzone.ingest`): `beginDecode` → `decodeFile` → `monoToAudioBuffer`
-  → `engine.loadBuffer` → `finishIngest`. **M2 hooks in at the `// M2 continues
-  here` marker**: worker → `segmentFramesToChunks` → white `Voice` + `f0`.
+- **Ingest** (`Dropzone.ingest`): `beginDecode` → `decodeFile` →
+  `beginAnalysis` → `trackPitch` (worker) → `beginSegmenting` →
+  `segmentFramesToChunks` → `finishAnalysis` (white `Voice` + `f0`) →
+  `monoToAudioBuffer` → `engine.loadBuffer`. Analysis failure degrades to
+  `finishIngest` (M1 shell) + blocking toast.
 - **Transport**: UI calls the engine (the clock); engine `onStateChange` mirrors
   into the store; TopBar polls at 10 Hz; canvas/ruler read the engine per frame.
   Never store playhead per-frame in zustand.
@@ -115,41 +163,45 @@ TS is `strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes`; lint add
 ## 5. File inventory
 
 Done: `constants(.test)`, `types`, `flags`, `dsp/audioUtil(.test)`,
-`dsp/theory(.test)`, `audio/engine|webEngine`, `persist/idb`,
+`dsp/theory(.test)`, `dsp/pitch(.test)` + `dsp/pitchTrack(.worker)` +
+`dsp/segment(.test)` + `dsp/chain(.test)` + `dsp/aubiojs.d.ts`,
+`audio/engine|webEngine`, `persist/idb`,
 `store/projectStore|selectionStore|undo(.test)`, `editor/useZoomPan(.test)`,
 `editor/PitchCanvas|Piano(.test)|Ruler|Minimap`,
 `app/App|TopBar|VoiceTabs|Dropzone`, `ui/Toast|Modal|ShortcutsHelp`,
 `public/piano/*.mp3`, configs, `e2e/smoke|ingest|view`.
-Stubs (grep `lands in M`): `dsp/pitchTrack.worker` + `dsp/segment` → **M2**;
-`editor/tools/{select,cut,move}` → M3; `audio/renderVoice.worker` → M4;
-`modals/AdvancedEdit` + `ui/Slider` → M5; `audio/exportWav|exportMidi`,
-`persist/fileSaveLoad` → M6.
+Stubs (grep `lands in M`): `editor/tools/{select,cut,move}` → **M3**;
+`audio/renderVoice.worker` → M4; `modals/AdvancedEdit` + `ui/Slider` → M5;
+`audio/exportWav|exportMidi`, `persist/fileSaveLoad` → M6.
 Tests: `src/**/*.test.ts`, `e2e/*.spec.ts` (system Chrome, `--mute-audio`,
-`reuseExistingServer`). QA fixtures in `/tmp/harmony-qa/` (regenerate with
-python `wave` if `/tmp` is wiped) + T1–T20 checklist (chat, 2026-10-13).
+`reuseExistingServer`). QA fixtures in `/tmp/harmony-qa/` (incl. new
+`vibrato.wav`: 3 s 220 Hz + 5 Hz/±5 Hz; regenerate with python `wave` if
+`/tmp` is wiped) + T1–T20 checklist (chat, 2026-10-13).
 
-## 6. M2 handoff
+## 6. M3 handoff (M2 items all done — kept as the acceptance record)
 
-1. `npm i aubiojs pitchy` (lazy WASM; JS-YIN fallback).
-2. `dsp/pitchTrack.worker.ts`: `{mono, sampleRate}` → per-frame
-   `{f0Hz, conf, rmsDb}`, voiced if `conf ≥ 0.7 && rms ≥ −40 dB`, median-5 +
-   Hampel, progress posts, cancellable. Range 50–1200 Hz.
-3. `dsp/segment.ts` per PRD §6.2 (signature frozen): 80 ms min-note, 40 ms
-   merges, 100-cent/50 ms splits, drop <60 ms, `baseMidi = round(median)`, keep
-   `pristineCurve` + `origBaseMidi`.
-4. Wire `Dropzone` at the M2 marker: decode → worker → chunks → white `Voice`
-   (`VOICE_COLORS[0]`, `nanoid`) → store → autosave (`f0` rides along).
-5. Verify: synthetic-curve split/merge tests; `vibrato.wav` (220 Hz + 5 Hz)
-   shows wobble; <2 s per 60 s; breaths = gaps; extend `e2e/ingest.spec.ts`
-   with a white-voice assertion if cheap.
-6. Do **not** touch: engine clock, zoom store, autosave schema (additive only),
-   canvas draw architecture.
+1. ~~`npm i aubiojs pitchy`~~ done (lazy via dynamic import, worker + fallback).
+2. ~~Worker~~ done (`yinfast` + pitchy fallback, progress, cancel-via-terminate).
+3. ~~`segment.ts`~~ done (exact-edge + median-window splits, merges, drops).
+4. ~~Wire `Dropzone`~~ done (`beginAnalysis`/`beginSegmenting`/`finishAnalysis`).
+5. ~~Verify~~ done: 63 unit, vibrato wobble screenshot, 0.68 s/60 s, breaths =
+   gaps, e2e white-voice + reload assertions.
+6. Untouched as required: engine clock, zoom store, autosave schema (no version
+   bump — `f0`/`voices` already in `Project`), canvas draw architecture.
+
+M3 entry: `editor/tools/{select,cut,move}` stubs + `useZoomPan` (single
+source) + `selectionStore`/`undo` + `drawChunk` ghost pattern in
+`PitchCanvas`. Ruler + playhead RAF already live.
 
 ## 7. Gotchas & backlog
 
 - Stale HMR dev server can fail e2e impossibly — restart it. Kill precisely:
   `kill <pid>`, never `pkill -f vite`. Playwright reuses a running server.
-- Backlog (not M2): waveform peak-cache at extreme zoom-out; dirty-flag
+- Build warns `Module "path"/"fs" externalized, imported by aubiojs/build/aubio.js`
+  (the package's CJS entry references node builtins). Benign: those branches
+  only run under Node; the Chrome worker path is e2e-verified. Revisit only if
+  aubio is ever imported on the main thread.
+- Backlog (not M3): waveform peak-cache at extreme zoom-out; dirty-flag
   rendering (battery); viewport-aware H-scroll max; default PWA icon; minimap
   viewport rect (M3); `body min-width: 1024px` desktop-first; no mobile touch
   editing (V1 out of scope).

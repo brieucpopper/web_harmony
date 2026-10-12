@@ -1,9 +1,23 @@
 // Ingest UI (PRD FR1): picker + drag-drop, progress, blocking error toasts,
-// monophonic banner. Decodes → loads engine buffer → stores project.
+// monophonic banner. Decodes → pitch-tracks (M2 worker) → segments white
+// voice → loads engine buffer → stores project.
 import { useCallback, useRef, useState } from 'react'
+import { nanoid } from 'nanoid'
 import { IngestError, decodeFile, monoToAudioBuffer } from '../dsp/audioUtil'
+import type { DecodedAudio } from '../dsp/audioUtil'
+import { segmentFramesToChunks } from '../dsp/segment'
+import { trackPitch } from '../dsp/pitchTrack'
+import type { Frame } from '../types'
 import { getEngine } from '../audio/webEngine'
 import { useProjectStore } from '../store/projectStore'
+
+function loadEngineBuffer(decoded: DecodedAudio): void {
+  const engine = getEngine()
+  const ctx = engine.getContext()
+  const buf = monoToAudioBuffer(ctx, decoded.mono, decoded.sampleRate)
+  engine.loadBuffer(buf, decoded.durationSec)
+  engine.setMasterVolume(useProjectStore.getState().masterVol)
+}
 
 export default function Dropzone(): React.JSX.Element {
   const status = useProjectStore((s) => s.status)
@@ -26,15 +40,44 @@ export default function Dropzone(): React.JSX.Element {
         if (stage === 'decoding') s.reportProgress(`Decoding ${file.name}…`, frac * 0.5)
         else s.reportProgress('Mixing to mono…', 0.5 + frac * 0.3)
       })
-      if (controller.signal.aborted) return
-      // M2 continues here: Analyzing pitch (x%) → Segmenting → Ready.
-      st.reportProgress('Ready', 1)
-      const engine = getEngine()
-      const ctx = engine.getContext()
-      const buf = monoToAudioBuffer(ctx, decoded.mono, decoded.sampleRate)
-      engine.loadBuffer(buf, decoded.durationSec)
-      engine.setMasterVolume(useProjectStore.getState().masterVol)
-      st.finishIngest(decoded)
+      if (controller.signal.aborted) throw new IngestError('decode', 'Cancelled.')
+      // M2: Analyzing pitch (x%) → Segmenting → Ready. No abort checkpoint
+      // needed between decode and analysis: trackPitch re-checks the signal
+      // on entry, so a late abort funnels to 'Cancelled.' → reset (no stuck
+      // 'decoding' state).
+      st.beginAnalysis()
+      let frames: Frame[]
+      try {
+        frames = await trackPitch(
+          decoded.mono,
+          decoded.sampleRate,
+          (frac) => {
+            if (controller.signal.aborted) throw new IngestError('decode', 'Cancelled.')
+            useProjectStore
+              .getState()
+              .reportProgress(`Analyzing pitch ${Math.round(frac * 100)}%…`, 0.8 + frac * 0.12)
+          },
+          controller.signal,
+        )
+      } catch (err) {
+        if (err instanceof IngestError && err.message === 'Cancelled.') throw err
+        // Degraded: analysis failed but the audio decoded fine — keep it
+        // playable (M1 shell) and surface the reason as a blocking toast.
+        loadEngineBuffer(decoded)
+        useProjectStore.getState().finishIngest(decoded)
+        useProjectStore
+          .getState()
+          .fail(err instanceof Error ? err.message : 'Pitch analysis failed.')
+        return
+      }
+      // Segmentation is synchronous: no abort can interleave here, and once
+      // frames resolved the worker is settled — always finish (an abort that
+      // lands now is a no-op by design, never a stuck 'analyzing' state).
+      st.beginSegmenting()
+      const whiteId = nanoid()
+      const chunks = segmentFramesToChunks(frames, whiteId)
+      loadEngineBuffer(decoded)
+      st.finishAnalysis(decoded, frames, whiteId, chunks)
     } catch (err) {
       if (err instanceof IngestError && err.message === 'Cancelled.') {
         useProjectStore.getState().reset()

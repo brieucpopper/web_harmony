@@ -10,6 +10,8 @@ test('ingest → play → seek → reload restores', async ({ page }) => {
   await page.getByLabel('Choose audio file, MP3 or WAV').setInputFiles(TONE_WAV)
   await expect(page.getByTestId('file-status')).toContainText('test-tone.wav', { timeout: 10_000 })
   await expect(page.getByTestId('time-display')).toHaveText('00:00.000 / 00:10.000')
+  // M2: pitch analysis yields the white voice tab.
+  await expect(page.getByTestId('voice-tabs')).toContainText('Voice 1')
 
   // Play → playhead advances (single AudioContext clock).
   await page.getByRole('button', { name: /Play \(Space\)/ }).click()
@@ -27,4 +29,6 @@ test('ingest → play → seek → reload restores', async ({ page }) => {
   await page.reload()
   await expect(page.getByTestId('file-status')).toContainText('test-tone.wav', { timeout: 10_000 })
   await expect(page.getByTestId('time-display')).toHaveText('00:00.000 / 00:10.000')
+  // M2: the white voice + f0 cache ride along in autosave (no re-analysis).
+  await expect(page.getByTestId('voice-tabs')).toContainText('Voice 1')
 })

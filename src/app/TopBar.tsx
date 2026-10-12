@@ -160,6 +160,18 @@ export default function TopBar({ onShowHelp }: TopBarProps): React.JSX.Element {
           />
           Key
         </label>
+        <label className="flex items-center gap-1 text-xs" title="Show the waveform preview behind notes">
+          <input
+            type="checkbox"
+            checked={project?.showWaveform !== false}
+            disabled={project === null}
+            onChange={(e) => {
+              useProjectStore.getState().setShowWaveform(e.target.checked)
+            }}
+            aria-label="Show waveform"
+          />
+          Wave
+        </label>
       </div>
 
       {/* Right: transport + persistence */}

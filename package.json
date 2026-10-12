@@ -15,8 +15,10 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "aubiojs": "^0.2.1",
     "dexie": "^4.4.6",
     "nanoid": "^6.0.2",
+    "pitchy": "^4.1.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tailwindcss": "^4.3.3",

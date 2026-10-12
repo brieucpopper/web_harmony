@@ -10,7 +10,10 @@ export default function VoiceTabs(): React.JSX.Element {
 
   if (project.voices.length === 0) {
     return (
-      <div className="flex items-center gap-2 bg-[#111A23] px-3 py-1 text-xs text-[#7d8fa1]">
+      <div
+        className="flex items-center gap-2 bg-[#111A23] px-3 py-1 text-xs text-[#7d8fa1]"
+        data-testid="voice-tabs"
+      >
         <span>Voices appear after pitch analysis (M2).</span>
         <span className="opacity-60">Up to {MAX_VOICES} voices in V1.</span>
       </div>
@@ -18,7 +21,12 @@ export default function VoiceTabs(): React.JSX.Element {
   }
 
   return (
-    <div className="flex items-center gap-2 bg-[#111A23] px-3 py-1" role="tablist" aria-label="Voices">
+    <div
+      className="flex items-center gap-2 bg-[#111A23] px-3 py-1"
+      role="tablist"
+      aria-label="Voices"
+      data-testid="voice-tabs"
+    >
       {project.voices.map((v) => (
         <div
           key={v.id}

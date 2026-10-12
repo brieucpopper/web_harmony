@@ -258,9 +258,10 @@ export default function PitchCanvas(): React.JSX.Element {
         }
       }
 
-      // --- Waveform preview (M1 accept) ---
+      // --- Waveform preview (M1 accept; hiding via the Wave toggle) ---
       const mono = audio?.mono
-      if (mono !== undefined && audio !== null) {
+      const showWaveform = project?.showWaveform !== false
+      if (showWaveform && mono !== undefined && audio !== null) {
         ctx.strokeStyle = 'rgba(143,163,184,0.65)'
         ctx.lineWidth = 1
         ctx.beginPath()

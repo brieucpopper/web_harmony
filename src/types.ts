@@ -57,6 +57,8 @@ export interface Project {
   snapToGrid: boolean
   /** Tint pitch rows by key membership (FR7.2). Default true. */
   highlightKey: boolean
+  /** Draw the mono waveform preview behind chunks. Default true. */
+  showWaveform: boolean
   voices: Voice[]
   /** Full pitch-track cache (skips re-analysis on reload). Empty until M2. */
   f0: Frame[]
@@ -82,6 +84,7 @@ export function emptyProject(name: string): Project {
     showGrid: true,
     snapToGrid: false,
     highlightKey: true,
+    showWaveform: true,
     voices: [],
     f0: [],
     sampleRate: 44100,
