@@ -2,7 +2,7 @@
 **Version:** 1.0-locked
 **Date:** 2026-10-12
 **Status:** Agreed from interview batches 1-3. Ready to build.
-**Amendment 2026-10-13 (user-approved):** viewport gestures are wheel = V-zoom to cursor, Ctrl/⌘+wheel = H-zoom to cursor, Shift+wheel = horizontal pan, middle-drag = pan, Ctrl+0/+/− = zoom reset/in/out (browser page-zoom locked at 100%). §4 + M3.1 updated. Zoom ranges widened to 10–400 px/sec, 8–64 px/semitone, then to 5–600 px/sec, 4–96 px/semitone (FR3.2).
+**Amendment 2026-10-13:** wheel = V-zoom, Ctrl/⌘+wheel = H-zoom, Shift+wheel = H-pan, middle-drag = pan, Ctrl+0/+/− = zoom in/out/reset (page-zoom locked 100%). Zoom 5–600 px/sec, 4–96 px/semitone.
 **Goal:** Web-based vocal harmony generator like FL Newtone (see reference screenshot).
 
 Reference image behavior: white blobs = original voice chunks, orange line = measured pitch curve f0(t), piano keyboard left = pitch axis, horizontal = time, playhead vertical line, dark theme.
@@ -28,7 +28,7 @@ Upload a raw monophonic voice recording (MP3). App signal-processes it into a MI
 9. Selection = **click + Shift-click + marquee-drag + Esc clear**. Group move preserves relative offsets. Del deletes any voice chunk (undoable).
 10. Cut/resize = **Cut tool (C/scissors, click to split, curve split) + Delete + right-edge trim/extend (silence)**. No merge, no left-edge stretch V1.
 11. Key behavior = **24 keys (12 roots × major/minor), bright in-scale / dim out-of-scale, red border for non-scale chunks, Snap-to-Key transposes selected (or all) to nearest in-scale (nearest, tie-down). White default OFF, others manual button + optional Magnet toggle.**
-12. Viewport = **C2–C6 (~48 notes) vertical scroll, H-zoom 10–200 px/sec via Ctrl+wheel+buttons+minimap, V-zoom 8–32 px/semitone via Alt+wheel, piano 120 px fixed, click previews sine, ruler shows bar.beat + sec.**
+12. Viewport = **C2–C6 vertical scroll, H-zoom 5–600 px/sec, V-zoom 4–96 px/semitone, piano 120 px fixed, click previews piano sample, ruler shows bar.beat + sec.**
 13. Advanced modal V1 = **avg note + cents off + confidence + duration + Re-center + Flatten slider + Fine slider + Reset + Apply/Cancel + Undo**. No vibrato/gain/timing-quantize V1.
 14. BPM = **40–240 default 120, 4/4 only, Show Grid + Snap-to-Grid toggles, thin beat / thick bar lines**. No auto-BPM, tap-tempo, offset, time-sig change V1.
 15. Transport/mixer V1 = **Play/Pause (Space), Stop, click-seek, Loop-all toggle (full project), master volume. Per voice: color dot, M/S, volume 0–1.5, octave ±12 quick buttons, duplicate/delete. No pan, no region-loop V1.**
@@ -85,9 +85,9 @@ Upload a raw monophonic voice recording (MP3). App signal-processes it into a MI
 - FR3.3: Grid: white-key rows `#2A3A4A`, black-key rows `#22303E`. In-key rows full brightness, out-of-key 45% dim. Beat thin `#334455`, bar thick `#4A6076`.
 - FR3.4: Chunk draw: rounded rect voice color @30% fill + 1.5 px border (selected 2.5 px white, out-of-key red `#EF4444`). Orange curve `#E89A2E` 2 px polyline of `midiFloat`. White vibrato fill under curve @40%.
 - FR3.5: Playhead 2 px orange vertical + triangle marker in ruler. Ruler shows `bar.beat` (from BPM, 4/4, 0 at 0 s) + `0.0s`. Time numbers 1,2,3,4,5 like screenshot.
-- FR3.6: Piano: white/black keys drawn, labels C2..C6, hover highlight, click → `previewSine(midi, 0.4s)`. Current playhead pitch range auto-scroll optional.
+- FR3.6: Piano: keys drawn, labels C2..C6, hover highlight, click → sampled piano preview (sine fallback). In key-highlight mode keys collapse to 2 colors (white = in key, gray = out). Current playhead pitch range auto-scroll optional.
 - FR3.7: Virtualization: only draw chunks intersecting viewport. 60 fps pan/zoom to 500 chunks. Use single `<canvas>` + `devicePixelRatio` scaling, `requestAnimationFrame` throttling.
-- **Accept:** matches screenshot ergonomics; zoom buttons + Ctrl/Alt+wheel work.
+- **Accept:** matches screenshot ergonomics; zoom buttons + wheel gestures work.
 
 ### FR4 — Selection & Move
 - FR4.1: Tools: `Select (V)`, `Cut (C)`. Esc clears, Del deletes selected.
@@ -323,12 +323,12 @@ Do in order. Each milestone ends with runnable app + acceptance check. Estimated
 1. `npm i aubiojs pitchy` (lazy). `dsp/pitchTrack.worker.ts`: receives `Float32Array mono, sr`, returns `Frame[]` with progress posts. YIN 1024/441, conf+rms, median-5.
 2. `dsp/segment.ts` pure: implement §6.2. Unit tests with synthetic `curve` (sine + step) → expect splits.
 3. Wire: after decode → post to worker → `voices=[white]` with chunks (`origBaseMidi=baseMidi`, `pristineCurve=copy`). Cache `f0` in store + IDB.
-4. `editor/PitchCanvas.tsx` v1: draw grid + white blocks + orange curve + playhead (no edit yet). `Piano.tsx` static + click sine preview (`OscillatorNode`).
+4. `editor/PitchCanvas.tsx` v1: draw grid + white blocks + orange curve + playhead (no edit yet). `Piano.tsx` static + click piano-sample preview (sine fallback).
 5. Fixture: generate `test/vibrato.wav` (python sine 220 Hz + 5 Hz vibrato) → verify curve wobble visible.
 - ✅ Check: analysis <2 s/60 s, breaths = gaps.
 
 ## M3 — Core Editor: zoom/pan/select/move/cut/trim/undo (3–4 days)
-1. `editor/useZoomPan.ts`: `pxPerSec 10–200, pxPerNote 8–32, scrollX/Y`, wheel V-zoom to cursor, Ctrl+wheel H-zoom to cursor, Shift+wheel H-pan, middle-drag pan, labeled H/V buttons + 100% reset (Ctrl+0/+/−), custom V-scroll, minimap viewport rect.
+1. `editor/useZoomPan.ts`: `pxPerSec 5–600, pxPerNote 4–96, scrollX/Y`, wheel V-zoom to cursor, Ctrl/⌘+wheel H-zoom to cursor, Shift+wheel H-pan, middle-drag pan, labeled H/V buttons + 100% reset (Ctrl+0/+/−), custom V-scroll, minimap viewport rect.
 2. `store/selectionStore.ts` + `undo.ts`: `{selectedIds, tool:'select'|'cut', pushUndo(patch)}` depth 50.
 3. `editor/tools/move.ts`: hit-test chunk body vs right-edge (6 px) vs empty. Drag ghost (draw dashed preview + tooltip), on mouseup commit with same-voice overlap clamp. Keyboard moves.
 4. Marquee: mousedown empty → rect → select intersecting. Shift-click toggle. Esc/Del.
@@ -374,6 +374,3 @@ npm run build && npm run preview  # PWA preview
 
 ## Definition of Done V1
 All FR1–FR11 acceptance checks pass, NFR budgets met, `prd.md` matches shipped behavior, no backend, no data loss on reload, exports open externally.
-
----
-*Next: reply `approved, start M0` to scaffold code. Question from PRD: embed WAV in `.harmony.json` if <10 MB, or always link separately? Recommended: link separately + prompt re-link (keeps project files small).*
