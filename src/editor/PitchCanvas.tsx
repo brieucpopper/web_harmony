@@ -1,12 +1,15 @@
-// Piano-roll canvas, v1 (PRD FR3). Single Canvas2D + DPR + continuous RAF loop.
+// Piano-roll canvas (PRD FR3–FR5). Single Canvas2D + DPR + continuous RAF loop.
 // Render loop and input listeners are mount-once: every frame reads the
 // stores via getState(), so wheel/zoom ticks never tear down the loop or
 // re-render React (smooth pan/zoom, drag state survives in a ref).
-// M0/M1 content: grid + waveform + demo chunks. Editing lands in M3.
+// M3 editing: click / Shift-click / marquee select, drag move (ghost +
+// tooltip), right-edge trim, cut-tool split. Mutations go through the
+// project store (undoable); the drag preview lives in a ref until mouseup.
 import { useEffect, useRef } from 'react'
 import {
   COLORS,
   MIDI_C2,
+  MIDI_C6,
   NOTE_COUNT,
   isBlackKey,
   midiToNoteName,
@@ -18,6 +21,9 @@ import { useProjectStore } from '../store/projectStore'
 import { useSelectionStore } from '../store/selectionStore'
 import { pitchClass, scaleSet } from '../dsp/theory'
 import { routeWheel, useZoomPan } from './useZoomPan'
+import { hitTest, marqueeSelect } from './tools/select'
+import { clampMoveDeltas, deltasFromPixels, keyboardDelta, snapDeltaToGrid } from './tools/move'
+import { locateChunk, trimChunkEnd } from './tools/cut'
 import type { Chunk } from '../types'
 
 /** M0 demo: 2 hardcoded chunks proving Y/X math before M2 analysis exists. */
@@ -62,6 +68,25 @@ interface MidDrag {
   scrollX: number
   scrollY: number
 }
+
+/** M3 pointer gesture, held in a ref (never React state — 60 fps drag). */
+type Drag =
+  | {
+      kind: 'move'
+      ids: string[]
+      originStart: number
+      startX: number
+      startY: number
+      dMidi: number
+      dSec: number
+      tipX: number
+      tipY: number
+    }
+  | { kind: 'trim'; id: string; origEnd: number; newEnd: number; tipX: number; tipY: number }
+  | { kind: 'marquee'; x0: number; y0: number; x1: number; y1: number; additive: boolean }
+
+/** Marquee smaller than this is a plain empty click (clears selection). */
+const MARQUEE_MIN_PX = 4 as const
 
 interface ChunkDrawView {
   pxPerSec: number
@@ -115,11 +140,35 @@ function drawChunk(
   }
 }
 
+/** Floating drag readout, e.g. `E4 (+7st) @ 12.34s` (PRD §4). */
+function drawTooltip(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  tipX: number,
+  tipY: number,
+  cssW: number,
+): void {
+  ctx.font = '11px Inter, system-ui, sans-serif'
+  const w = ctx.measureText(text).width + 12
+  const x = Math.min(Math.max(4, tipX + 12), Math.max(4, cssW - w - 4))
+  const y = Math.max(4, tipY - 30)
+  ctx.fillStyle = COLORS.header
+  ctx.strokeStyle = COLORS.accent
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.rect(x, y, w, 20)
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = COLORS.text
+  ctx.fillText(text, x + 6, y + 14)
+}
+
 export default function PitchCanvas(): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   // Ref, not effect-closure state: survives the (now rare) effect re-runs.
   const midDragRef = useRef<MidDrag | null>(null)
+  const dragRef = useRef<Drag | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -169,29 +218,169 @@ export default function PitchCanvas(): React.JSX.Element {
     wrap.addEventListener('wheel', onWheel, { passive: false })
 
     // Middle-drag pans both axes (also blocks the browser autoscroll).
-    // M3 adds marquee-select on left-drag here.
-    const onPointerDown = (e: PointerEvent): void => {
-      if (e.button !== 1) return
-      e.preventDefault()
+    // Left-drag edits: cut split, body move, right-edge trim, marquee.
+    const contentPoint = (clientX: number, clientY: number): { sec: number; midi: number; relX: number; relY: number } => {
+      const rect = canvas.getBoundingClientRect()
       const st = useZoomPan.getState()
-      midDragRef.current = {
-        startX: e.clientX,
-        startY: e.clientY,
-        scrollX: st.scrollX,
-        scrollY: st.scrollY,
+      const relX = clientX - rect.left
+      const relY = clientY - rect.top
+      return {
+        sec: (relX + st.scrollX) / st.pxPerSec,
+        midi: MIDI_C6 - (relY + st.scrollY) / st.pxPerNote,
+        relX,
+        relY,
       }
-      wrap.style.cursor = 'grabbing'
+    }
+    const onPointerDown = (e: PointerEvent): void => {
+      if (e.button === 1) {
+        e.preventDefault()
+        const st = useZoomPan.getState()
+        midDragRef.current = {
+          startX: e.clientX,
+          startY: e.clientY,
+          scrollX: st.scrollX,
+          scrollY: st.scrollY,
+        }
+        wrap.style.cursor = 'grabbing'
+        return
+      }
+      if (e.button !== 0) return
+      // Focus for arrow-key moves (FR4.5); the wrap owns Delete/arrows.
+      wrap.focus({ preventScroll: true })
+      const project = useProjectStore.getState().project
+      if (project === null) return // demo mode: no editing
+      const pt = contentPoint(e.clientX, e.clientY)
+      const st = useZoomPan.getState()
+      if (useSelectionStore.getState().tool === 'cut') {
+        const hit = hitTest(project.voices, pt.sec, pt.midi, st)
+        if (hit !== undefined) useProjectStore.getState().splitChunk(hit.chunk.id, pt.sec)
+        return
+      }
+      const hit = hitTest(project.voices, pt.sec, pt.midi, st)
+      if (hit !== undefined && hit.edge === 'right') {
+        useSelectionStore.getState().selectOnly(hit.chunk.id)
+        dragRef.current = {
+          kind: 'trim',
+          id: hit.chunk.id,
+          origEnd: hit.chunk.endSec,
+          newEnd: hit.chunk.endSec,
+          tipX: pt.relX,
+          tipY: pt.relY,
+        }
+        wrap.style.cursor = 'ew-resize'
+        return
+      }
+      if (hit !== undefined) {
+        const sel = useSelectionStore.getState()
+        if (e.shiftKey) sel.toggleAdd(hit.chunk.id)
+        else if (!sel.selectedIds.includes(hit.chunk.id)) sel.selectOnly(hit.chunk.id)
+        dragRef.current = {
+          kind: 'move',
+          ids: useSelectionStore.getState().selectedIds,
+          originStart: hit.chunk.startSec,
+          startX: e.clientX,
+          startY: e.clientY,
+          dMidi: 0,
+          dSec: 0,
+          tipX: pt.relX,
+          tipY: pt.relY,
+        }
+        wrap.style.cursor = 'move'
+        return
+      }
+      dragRef.current = { kind: 'marquee', x0: pt.relX, y0: pt.relY, x1: pt.relX, y1: pt.relY, additive: e.shiftKey }
+    }
+    const hoverCursor = (e: PointerEvent): void => {
+      const project = useProjectStore.getState().project
+      if (project === null) {
+        wrap.style.cursor = ''
+        return
+      }
+      if (useSelectionStore.getState().tool === 'cut') {
+        wrap.style.cursor = 'crosshair'
+        return
+      }
+      const pt = contentPoint(e.clientX, e.clientY)
+      const hit = hitTest(project.voices, pt.sec, pt.midi, useZoomPan.getState())
+      if (hit === undefined) wrap.style.cursor = ''
+      else wrap.style.cursor = hit.edge === 'right' ? 'ew-resize' : 'move'
     }
     const onPointerMove = (e: PointerEvent): void => {
-      const drag = midDragRef.current
-      if (drag === null) return
-      useZoomPan
-        .getState()
-        .setScroll(drag.scrollX - (e.clientX - drag.startX), drag.scrollY - (e.clientY - drag.startY))
+      const mid = midDragRef.current
+      if (mid !== null) {
+        useZoomPan
+          .getState()
+          .setScroll(mid.scrollX - (e.clientX - mid.startX), mid.scrollY - (e.clientY - mid.startY))
+        return
+      }
+      const drag = dragRef.current
+      if (drag === null) {
+        hoverCursor(e)
+        return
+      }
+      const project = useProjectStore.getState().project
+      if (project === null) {
+        dragRef.current = null
+        return
+      }
+      const pt = contentPoint(e.clientX, e.clientY)
+      const st = useZoomPan.getState()
+      if (drag.kind === 'move') {
+        const raw = deltasFromPixels(e.clientX - drag.startX, e.clientY - drag.startY, st.pxPerSec, st.pxPerNote)
+        const sec = project.snapToGrid
+          ? snapDeltaToGrid(drag.originStart, raw.dSec, 60 / project.bpm)
+          : raw.dSec
+        const clamped = clampMoveDeltas(project.voices, drag.ids, raw.dMidi, sec)
+        drag.dMidi = clamped.dMidi
+        drag.dSec = clamped.dSec
+        drag.tipX = pt.relX
+        drag.tipY = pt.relY
+      } else if (drag.kind === 'trim') {
+        const found = locateChunk(project.voices, drag.id)
+        drag.newEnd = found === undefined
+          ? drag.origEnd
+          : trimChunkEnd(found.chunk, pt.sec, found.nextStartSec).endSec
+        drag.tipX = pt.relX
+        drag.tipY = pt.relY
+      } else {
+        drag.x1 = pt.relX
+        drag.y1 = pt.relY
+      }
     }
     const onPointerUp = (): void => {
-      midDragRef.current = null
+      if (midDragRef.current !== null) {
+        midDragRef.current = null
+        wrap.style.cursor = ''
+        return
+      }
+      const drag = dragRef.current
+      dragRef.current = null
       wrap.style.cursor = ''
+      if (drag === null) return
+      const store = useProjectStore.getState()
+      const project = store.project
+      if (project === null) return
+      if (drag.kind === 'move') {
+        if (drag.dMidi !== 0 || drag.dSec !== 0) store.moveChunks(drag.ids, drag.dMidi, drag.dSec)
+      } else if (drag.kind === 'trim') {
+        if (drag.newEnd !== drag.origEnd) store.trimChunk(drag.id, drag.newEnd)
+      } else {
+        const st = useZoomPan.getState()
+        const small =
+          Math.abs(drag.x1 - drag.x0) < MARQUEE_MIN_PX && Math.abs(drag.y1 - drag.y0) < MARQUEE_MIN_PX
+        const sel = useSelectionStore.getState()
+        if (small) {
+          if (!drag.additive) sel.clear()
+          return
+        }
+        const t0 = (Math.min(drag.x0, drag.x1) + st.scrollX) / st.pxPerSec
+        const t1 = (Math.max(drag.x0, drag.x1) + st.scrollX) / st.pxPerSec
+        const mHi = MIDI_C6 - (Math.min(drag.y0, drag.y1) + st.scrollY) / st.pxPerNote
+        const mLo = MIDI_C6 - (Math.max(drag.y0, drag.y1) + st.scrollY) / st.pxPerNote
+        const ids = marqueeSelect(project.voices, t0, t1, mLo, mHi)
+        if (drag.additive) sel.selectMany([...new Set([...sel.selectedIds, ...ids])])
+        else sel.selectMany(ids)
+      }
     }
     wrap.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('pointermove', onPointerMove)
@@ -308,6 +497,82 @@ export default function PitchCanvas(): React.JSX.Element {
         ctx.fillText('DEMO — upload audio to replace (M1)', 8, 16)
       }
 
+      // --- M3 drag preview: ghost + marquee + tooltip (no store writes) ---
+      const gesture = dragRef.current
+      if (gesture !== null && project !== null) {
+        if (gesture.kind === 'move' && (gesture.dMidi !== 0 || gesture.dSec !== 0)) {
+          ctx.save()
+          ctx.setLineDash([6, 4])
+          ctx.strokeStyle = '#FFFFFF'
+          ctx.lineWidth = 1.5
+          for (const voice of project.voices) {
+            for (const ch of voice.chunks) {
+              if (!gesture.ids.includes(ch.id)) continue
+              const x = secToX(ch.startSec + gesture.dSec, pxPerSec) - scrollX
+              const w = Math.max(3, secToX(ch.endSec + gesture.dSec, pxPerSec) - secToX(ch.startSec + gesture.dSec, pxPerSec))
+              if (x + w < 0 || x > cssW) continue
+              roundRect(ctx, x, midiToY(ch.baseMidi + gesture.dMidi, pxPerNote) - scrollY, w, Math.max(4, pxPerNote), 4)
+              ctx.stroke()
+            }
+          }
+          ctx.restore()
+          const primary = gesture.ids
+            .map((id) => {
+              for (const v of project.voices) {
+                const c = v.chunks.find((k) => k.id === id)
+                if (c !== undefined) return c
+              }
+              return undefined
+            })
+            .find((c) => c !== undefined)
+          if (primary !== undefined) {
+            const multi = gesture.ids.length > 1 ? `${String(gesture.ids.length)}× ` : ''
+            const sign = gesture.dMidi >= 0 ? '+' : ''
+            drawTooltip(
+              ctx,
+              `${multi}${midiToNoteName(primary.baseMidi + gesture.dMidi)} (${sign}${String(gesture.dMidi)}st) @ ${(primary.startSec + gesture.dSec).toFixed(2)}s`,
+              gesture.tipX,
+              gesture.tipY,
+              cssW,
+            )
+          }
+        } else if (gesture.kind === 'trim') {
+          const found = locateChunk(project.voices, gesture.id)
+          if (found !== undefined && gesture.newEnd !== gesture.origEnd) {
+            const x = secToX(gesture.newEnd, pxPerSec) - scrollX
+            ctx.save()
+            ctx.setLineDash([6, 4])
+            ctx.strokeStyle = '#FFFFFF'
+            ctx.lineWidth = 1.5
+            ctx.beginPath()
+            ctx.moveTo(x, 0)
+            ctx.lineTo(x, cssH)
+            ctx.stroke()
+            ctx.restore()
+            drawTooltip(
+              ctx,
+              `${gesture.newEnd.toFixed(2)}s · ${String(Math.round((gesture.newEnd - found.chunk.startSec) * 1000))}ms`,
+              gesture.tipX,
+              gesture.tipY,
+              cssW,
+            )
+          }
+        } else if (gesture.kind === 'marquee') {
+          const x = Math.min(gesture.x0, gesture.x1)
+          const y = Math.min(gesture.y0, gesture.y1)
+          const w = Math.abs(gesture.x1 - gesture.x0)
+          const h = Math.abs(gesture.y1 - gesture.y0)
+          ctx.fillStyle = 'rgba(232,154,46,0.12)'
+          ctx.fillRect(x, y, w, h)
+          ctx.save()
+          ctx.setLineDash([4, 3])
+          ctx.strokeStyle = COLORS.accent
+          ctx.lineWidth = 1
+          ctx.strokeRect(x + 0.5, y + 0.5, w, h)
+          ctx.restore()
+        }
+      }
+
       // --- Playhead ---
       if (audio !== null) {
         const px = secToX(engine.getPlayhead(), pxPerSec) - scrollX
@@ -355,8 +620,31 @@ export default function PitchCanvas(): React.JSX.Element {
   return (
     <div
       ref={wrapRef}
-      className="relative h-full w-full overflow-hidden"
+      tabIndex={0}
+      role="application"
+      aria-label="Piano roll editor: click notes to select, arrows to move, Delete to remove"
+      className="relative h-full w-full overflow-hidden focus:outline-none focus-visible:ring-1 focus-visible:ring-[#E89A2E]"
       data-testid="pitch-canvas-wrap"
+      onKeyDown={(e) => {
+        const project = useProjectStore.getState().project
+        if (project === null) return
+        const sel = useSelectionStore.getState()
+        if (e.key.startsWith('Arrow')) {
+          // Ruler owns arrows for seek; the editor owns them for chunk moves.
+          // Stop propagation so the global handler never double-fires.
+          if (sel.selectedIds.length === 0) return
+          e.preventDefault()
+          e.stopPropagation()
+          const dir = e.key === 'ArrowLeft' ? 'left' : e.key === 'ArrowRight' ? 'right' : e.key === 'ArrowUp' ? 'up' : 'down'
+          const d = keyboardDelta(dir, e.shiftKey, project.snapToGrid, project.bpm)
+          useProjectStore.getState().moveChunks(sel.selectedIds, d.dMidi, d.dSec)
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+          if (sel.selectedIds.length === 0) return
+          e.preventDefault()
+          e.stopPropagation()
+          useProjectStore.getState().deleteChunks(sel.selectedIds)
+        }
+      }}
     >
       <canvas ref={canvasRef} className="block" aria-label="Piano roll: pitch versus time" />
     </div>

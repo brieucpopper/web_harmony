@@ -1,6 +1,6 @@
 # Harmony Gen — Progress & Handoff
 
-**Date:** 2026-10-13 · **State:** M0 + M1 + M2 shipped and verified · **Next:** M3 (core editor)
+**Date:** 2026-10-13 · **State:** M0 + M1 + M2 + M3 shipped (automated gates green, manual user QA pending) · **Next:** M4 (voices + render)
 **Read with:** `prd.md` (spec, §1–§12 + Part B). This records what was built,
 every deviation, and how pieces interact — enough for a second person to do M3.
 
@@ -9,10 +9,10 @@ every deviation, and how pieces interact — enough for a second person to do M3
 ```bash
 cd /home/brieuc/code/harmony-gen
 npm run dev        # localhost:5173 (restart it if e2e fails impossibly — see §7)
-npm test           # vitest: 63 passed
+npm test           # vitest: 87 passed (63 M2 + 24 M3 tools)
 npm run lint       # eslint, must be silent
-npm run build      # tsc -b + vite + PWA; main ~361 KB (~114 KB gzip) + pitch worker ~195 KB, budget 2 MB
-npx playwright test  # 7 passed, system Chrome (see playwright.config.ts)
+npm run build      # tsc -b + vite + PWA; main ~376 KB (~119 KB gzip) + pitch worker ~195 KB, budget 2 MB
+npx playwright test  # 9 passed, system Chrome (see playwright.config.ts)
 ```
 
 All gates green. Do not start M2 with a red gate.
@@ -166,11 +166,13 @@ Done: `constants(.test)`, `types`, `flags`, `dsp/audioUtil(.test)`,
 `dsp/theory(.test)`, `dsp/pitch(.test)` + `dsp/pitchTrack(.worker)` +
 `dsp/segment(.test)` + `dsp/chain(.test)` + `dsp/aubiojs.d.ts`,
 `audio/engine|webEngine`, `persist/idb`,
-`store/projectStore|selectionStore|undo(.test)`, `editor/useZoomPan(.test)`,
+`store/projectStore|selectionStore|undo(.test)`,
+`editor/useZoomPan(.test)` + `editor/tools/{select,cut,move}(.test)` +
+`editor/Toolbar`,
 `editor/PitchCanvas|Piano(.test)|Ruler|Minimap`,
 `app/App|TopBar|VoiceTabs|Dropzone`, `ui/Toast|Modal|ShortcutsHelp`,
-`public/piano/*.mp3`, configs, `e2e/smoke|ingest|view`.
-Stubs (grep `lands in M`): `editor/tools/{select,cut,move}` → **M3**;
+`public/piano/*.mp3`, configs, `e2e/smoke|ingest|view|edit`.
+Stubs (grep `lands in M`):
 `audio/renderVoice.worker` → M4; `modals/AdvancedEdit` + `ui/Slider` → M5;
 `audio/exportWav|exportMidi`, `persist/fileSaveLoad` → M6.
 Tests: `src/**/*.test.ts`, `e2e/*.spec.ts` (system Chrome, `--mute-audio`,
@@ -189,9 +191,48 @@ Tests: `src/**/*.test.ts`, `e2e/*.spec.ts` (system Chrome, `--mute-audio`,
 6. Untouched as required: engine clock, zoom store, autosave schema (no version
    bump — `f0`/`voices` already in `Project`), canvas draw architecture.
 
-M3 entry: `editor/tools/{select,cut,move}` stubs + `useZoomPan` (single
-source) + `selectionStore`/`undo` + `drawChunk` ghost pattern in
-`PitchCanvas`. Ruler + playhead RAF already live.
+### M3 — core editor (shipped 2026-10-13)
+- `editor/tools/{select,move,cut}` pure + tested (24 unit tests):
+  `hitTest` (right-edge 6 px band wins, later voices on top), `marqueeSelect`
+  (All-view, direction-independent), `deltasFromPixels`/`snapDeltaToGrid`
+  (origin-chunk lands on beat, group offsets preserved),
+  `keyboardDelta` (FR4.5), `clampMoveDeltas` (C2–C6, ≥0, same-voice
+  slide-to-touch, cross-voice overlap allowed), `applyMove` (rigid, curve
+  shifts with block), `splitChunkAt` (40 ms edge guard, per-side base
+  recompute, A keeps id / B fresh + selected, orig/pristine kept for
+  M4/M5), `trimChunkEnd` (60 ms min, +500 ms max, flat-baseMidi pad,
+  next-chunk touch), `locateChunk` (shared by store + canvas ghost).
+- Store (`projectStore`): `moveChunks`/`deleteChunks`/`splitChunk`/
+  `trimChunk`/`undo`/`redo` — every mutation pushes `undoStack`, prunes
+  dangling selection, autosaves, bumps `historyVersion` (toolbar Undo/Redo
+  enabled states). Zero-delta moves and no-op trims return before push
+  (click-without-drag never pollutes history).
+- `PitchCanvas`: left-drag select/move/trim/marquee + Cut-tool split on
+  pointerdown; ghost (dashed rects) + tooltip (`E4 (+7st) @ 12.34s`) +
+  marquee rect drawn in the mount-once RAF loop from a drag ref (zero React
+  re-renders, 60 fps path untouched); cursors default/move/ew-resize/
+  crosshair; wrap is `tabIndex=0` + owns Arrow/Delete keys (stopPropagation
+  so App/ruler never double-fire).
+- `editor/Toolbar.tsx` under VoiceTabs: Select/Cut (aria-pressed, V/C),
+  Undo/Redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, disabled states), Delete +
+  selection count. `App.tsx` global keys: V/C/Delete + undo/redo (before
+  the ctrl passthrough; INPUT/BUTTON guard kept). `ShortcutsHelp` gained
+  the Edit group. `Minimap` draws the viewport rect (re-renders on
+  zoom/scroll ticks). `main.tsx` exposes `window.__harmony`
+  (project/selection/zoom/undo) for e2e + debugging.
+- Verified: 87 unit, `e2e/edit.spec.ts` (click→marquee→drag→arrows→
+  undo/redo→cut→delete→reload-keeps-cut), full suite 9 passed.
+  Automated gates only — **not yet manually tested by the user**.
+- Deviations: red out-of-key chunk borders stay M5 (rows dim already);
+  marquee is always All-view (no active-voice setting exists until M4
+  tabs); Backspace deletes alongside Del; empty marquee click clears
+  (Shift+empty-click no-ops).
+- 500-chunk/60 fps + <50 ms drag accepted by architecture (ref drag, no
+  per-frame React work); re-run the T-manual stress list on a big file.
+
+M4 entry: `audio/renderVoice.worker` stub + `projectStore` voices slice
+(`moveChunks`/`undo` already voice-generic) + `VoiceTabs` (today shows
+name dots only). Canvas dims inactive voices in M4 (currently full).
 
 ## 7. Gotchas & backlog
 

@@ -1,5 +1,4 @@
-// Keyboard-shortcut guide (`?`). Lists only shortcuts that exist today —
-// select/cut/marquee arrive with the M3 editor.
+// Keyboard-shortcut guide (`?`). Lists only shortcuts that exist today.
 import Modal from './Modal'
 
 interface ShortcutsHelpProps {
@@ -17,6 +16,23 @@ const GROUPS: Array<{ name: string; rows: Array<[string, string]> }> = [
     ],
   },
   {
+    name: 'Edit',
+    rows: [
+      ['V / C', 'Select / Cut tool'],
+      ['Click chunk', 'Select (Shift-click adds)'],
+      ['Drag empty', 'Marquee select'],
+      ['Drag chunk', 'Move (ghost preview + tooltip)'],
+      ['Drag right edge', 'Trim end'],
+      ['Cut tool + click', 'Split note in two'],
+      ['← / →', 'Move ∓ 10 ms (Shift: 100 ms, Snap: 1 beat)'],
+      ['↑ / ↓', 'Move ∓ 1 semitone (Shift: octave)'],
+      ['Del', 'Delete selected'],
+      ['Ctrl+Z / Ctrl+Shift+Z', 'Undo / redo'],
+      ['Esc', 'Clear selection'],
+      ['Dbl-click', 'Advanced edit (M5)'],
+    ],
+  },
+  {
     name: 'View',
     rows: [
       ['Wheel', 'Zoom pitch axis (to cursor)'],
@@ -28,7 +44,6 @@ const GROUPS: Array<{ name: string; rows: Array<[string, string]> }> = [
       ['V − / + buttons', 'Zoom pitch axis'],
       ['100% button', 'Reset zoom'],
       ['Click minimap', 'Jump timeline'],
-      ['Esc', 'Clear selection'],
       ['?', 'This guide'],
     ],
   },
@@ -50,9 +65,6 @@ export default function ShortcutsHelp({ onClose }: ShortcutsHelpProps): React.JS
           </dl>
         </section>
       ))}
-      <p className="text-xs text-[#7d8fa1]">
-        Note editing (move, cut, trim) arrives with the M3 editor milestone.
-      </p>
     </Modal>
   )
 }

@@ -9,6 +9,7 @@ import PitchCanvas from '../editor/PitchCanvas'
 import Piano from '../editor/Piano'
 import Ruler, { RULER_H } from '../editor/Ruler'
 import Minimap from '../editor/Minimap'
+import Toolbar from '../editor/Toolbar'
 import { useZoomPan } from '../editor/useZoomPan'
 import Toast from '../ui/Toast'
 import ShortcutsHelp from '../ui/ShortcutsHelp'
@@ -94,9 +95,32 @@ export default function App(): React.JSX.Element {
         else zoom.zoomH(1)
         return
       }
+      // Undo/redo (FR4.6). Before the ctrl passthrough below.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const lower = e.key.toLowerCase()
+        if (lower === 'z' && !e.shiftKey) {
+          e.preventDefault()
+          useProjectStore.getState().undo()
+          return
+        }
+        if ((lower === 'z' && e.shiftKey) || lower === 'y') {
+          e.preventDefault()
+          useProjectStore.getState().redo()
+          return
+        }
+      }
       if (e.ctrlKey || e.metaKey) return
       const st = useProjectStore.getState()
-      if (e.code === 'Space') {
+      if (e.key === 'v' || e.key === 'V') {
+        useSelectionStore.getState().setTool('select')
+      } else if (e.key === 'c' || e.key === 'C') {
+        useSelectionStore.getState().setTool('cut')
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Canvas input (focused wrap) stops propagation and handles this
+        // itself; this branch covers focus elsewhere (toolbar, body).
+        const ids = useSelectionStore.getState().selectedIds
+        if (ids.length > 0) st.deleteChunks(ids)
+      } else if (e.code === 'Space') {
         e.preventDefault()
         const engine = getEngine()
         if (!engine.hasBuffer()) return
@@ -125,6 +149,7 @@ export default function App(): React.JSX.Element {
     <div className="flex h-full flex-col bg-[#1E2A36] text-[#E6EEF5]">
       <TopBar onShowHelp={() => { setHelpOpen(true); }} />
       <VoiceTabs />
+      <Toolbar />
       <Dropzone />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Header row: dead corner above the piano + ruler + spacer above VScroll.

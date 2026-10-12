@@ -8,6 +8,8 @@ import type { DecodedAudio } from '../dsp/audioUtil'
 import { autosaveAudio, autosaveProject, AUTOSAVE_AUDIO_ID } from '../persist/idb'
 import { undoStack } from './undo'
 import { useSelectionStore } from './selectionStore'
+import { applyMove, clampMoveDeltas } from '../editor/tools/move'
+import { locateChunk, splitChunkAt, trimChunkEnd } from '../editor/tools/cut'
 
 export interface LoadedAudio {
   mono: Float32Array
@@ -58,6 +60,19 @@ interface ProjectState {
   /** Restore a project + audio (reload path, FR11). */
   restore: (project: Project, audio: LoadedAudio | null) => void
   markClean: () => void
+
+  /** Bumped on every voices mutation + undo/redo (toolbar enabled states). */
+  historyVersion: number
+  /** Rigid group move, clamped (FR4.3–FR4.4). No-op when clamped to zero. */
+  moveChunks: (ids: string[], dMidi: number, dSec: number) => void
+  /** Delete any voice chunks (FR5.2, undoable). */
+  deleteChunks: (ids: string[]) => void
+  /** Split one chunk at t, select B (FR5.1, undoable). */
+  splitChunk: (id: string, tSec: number) => void
+  /** Right-edge trim (FR5.3, undoable). */
+  trimChunk: (id: string, newEndSec: number) => void
+  undo: () => void
+  redo: () => void
 }
 
 let autosaveTimer: ReturnType<typeof setTimeout> | null = null
@@ -83,6 +98,15 @@ function clampBpm(bpm: number): number {
   return Math.min(240, Math.max(40, Math.round(bpm)))
 }
 
+/** Drop selection ids whose chunks no longer exist (after delete/undo/redo). */
+function pruneSelection(voices: Project['voices']): void {
+  const alive = new Set<string>()
+  for (const v of voices) for (const c of v.chunks) alive.add(c.id)
+  const sel = useSelectionStore.getState()
+  const kept = sel.selectedIds.filter((id) => alive.has(id))
+  if (kept.length !== sel.selectedIds.length) sel.selectMany(kept)
+}
+
 export const useProjectStore = create<ProjectState>()((set, get) => ({
   project: null,
   audio: null,
@@ -95,6 +119,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
   loopAll: false,
   masterVol: 1,
   dirty: false,
+  historyVersion: 0,
 
   beginDecode: (fileName) => { set({
       status: 'decoding',
@@ -124,7 +149,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     undoStack.clear()
     useSelectionStore.getState().clear()
     scheduleAutosave(project, audio)
-    set({
+    set((s) => ({
       project,
       audio,
       status: 'ready',
@@ -132,7 +157,8 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
       progressLabel: 'Ready',
       error: null,
       dirty: true,
-    })
+      historyVersion: s.historyVersion + 1,
+    }))
   },
 
   beginAnalysis: () => { set({
@@ -175,7 +201,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     undoStack.clear()
     useSelectionStore.getState().clear()
     scheduleAutosave(project, audio)
-    set({
+    set((s) => ({
       project,
       audio,
       status: 'ready',
@@ -183,7 +209,8 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
       progressLabel: 'Ready',
       error: null,
       dirty: true,
-    })
+      historyVersion: s.historyVersion + 1,
+    }))
   },
 
   fail: (message) => { set({ status: 'error', error: message, progressLabel: '' }); },
@@ -195,7 +222,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     if (project !== null && audio !== null) scheduleAutosave(project, audio)
     undoStack.clear()
     useSelectionStore.getState().clear()
-    set({
+    set((s) => ({
       project: null,
       audio: null,
       status: 'empty',
@@ -204,7 +231,8 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
       playing: false,
       playheadSec: 0,
       dirty: false,
-    })
+      historyVersion: s.historyVersion + 1,
+    }))
   },
 
   setBpm: (bpm) => {
@@ -273,7 +301,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     // M6 Load calls this same path, so history never leaks across projects.
     undoStack.clear()
     useSelectionStore.getState().clear()
-    set({
+    set((s) => ({
       project: normalized,
       audio,
       status: 'ready',
@@ -284,7 +312,111 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
       playheadSec: 0,
       loopAll: false,
       dirty: false,
-    }); },
+      historyVersion: s.historyVersion + 1,
+    })); },
 
   markClean: () => { set({ dirty: false }); },
+
+  moveChunks: (ids, dMidi, dSec) => {
+    const { project, audio, historyVersion } = get()
+    if (project === null || ids.length === 0) return
+    const clamped = clampMoveDeltas(project.voices, ids, dMidi, dSec)
+    if (clamped.dMidi === 0 && clamped.dSec === 0) return
+    undoStack.push('move', project.voices)
+    const next = { ...project, voices: applyMove(project.voices, ids, clamped) }
+    scheduleAutosave(next, audio)
+    set({ project: next, dirty: true, historyVersion: historyVersion + 1 })
+  },
+
+  deleteChunks: (ids) => {
+    const { project, audio, historyVersion } = get()
+    if (project === null || ids.length === 0) return
+    const wanted = new Set(ids)
+    if (!project.voices.some((v) => v.chunks.some((c) => wanted.has(c.id)))) return
+    undoStack.push('delete', project.voices)
+    const next = {
+      ...project,
+      voices: project.voices.map((v) => ({
+        ...v,
+        chunks: v.chunks.filter((c) => !wanted.has(c.id)),
+      })),
+    }
+    scheduleAutosave(next, audio)
+    pruneSelection(next.voices)
+    set({ project: next, dirty: true, historyVersion: historyVersion + 1 })
+  },
+
+  splitChunk: (id, tSec) => {
+    const { project, audio, historyVersion } = get()
+    if (project === null) return
+    let split: { voiceIdx: number; chunkIdx: number; a: Chunk; b: Chunk } | null = null
+    for (let vi = 0; vi < project.voices.length && split === null; vi++) {
+      const voice = project.voices[vi]
+      if (voice === undefined) continue
+      for (let ci = 0; ci < voice.chunks.length; ci++) {
+        const chunk = voice.chunks[ci]
+        if (chunk === undefined || chunk.id !== id) continue
+        const res = splitChunkAt(chunk, tSec)
+        if (res !== null) split = { voiceIdx: vi, chunkIdx: ci, a: res.a, b: res.b }
+        break
+      }
+    }
+    if (split === null) return
+    undoStack.push('cut', project.voices)
+    const next = {
+      ...project,
+      voices: project.voices.map((v, vi) => {
+        if (vi !== split.voiceIdx) return v
+        const chunks = [...v.chunks]
+        chunks.splice(split.chunkIdx, 1, split.a, split.b)
+        return { ...v, chunks }
+      }),
+    }
+    scheduleAutosave(next, audio)
+    // FR5.1: select B after split.
+    useSelectionStore.getState().selectOnly(split.b.id)
+    set({ project: next, dirty: true, historyVersion: historyVersion + 1 })
+  },
+
+  trimChunk: (id, newEndSec) => {
+    const { project, audio, historyVersion } = get()
+    if (project === null) return
+    const found = locateChunk(project.voices, id)
+    if (found === undefined) return
+    const trimmed = trimChunkEnd(found.chunk, newEndSec, found.nextStartSec)
+    if (trimmed.endSec === found.chunk.endSec) return
+    undoStack.push('trim', project.voices)
+    const targetId = found.chunk.id
+    const next = {
+      ...project,
+      voices: project.voices.map((v) => ({
+        ...v,
+        chunks: v.chunks.map((c) => (c.id === targetId ? trimmed : c)),
+      })),
+    }
+    scheduleAutosave(next, audio)
+    set({ project: next, dirty: true, historyVersion: historyVersion + 1 })
+  },
+
+  undo: () => {
+    const { project, audio, historyVersion } = get()
+    if (project === null || !undoStack.canUndo) return
+    const restored = undoStack.undoPop(project.voices)
+    if (restored === undefined) return
+    const next = { ...project, voices: restored }
+    scheduleAutosave(next, audio)
+    pruneSelection(next.voices)
+    set({ project: next, dirty: true, historyVersion: historyVersion + 1 })
+  },
+
+  redo: () => {
+    const { project, audio, historyVersion } = get()
+    if (project === null || !undoStack.canRedo) return
+    const restored = undoStack.redoPop(project.voices)
+    if (restored === undefined) return
+    const next = { ...project, voices: restored }
+    scheduleAutosave(next, audio)
+    pruneSelection(next.voices)
+    set({ project: next, dirty: true, historyVersion: historyVersion + 1 })
+  },
 }))
